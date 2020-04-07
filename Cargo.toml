@@ -1,0 +1,15 @@
+[package]
+name = "fanotify"
+version = "0.1.0"
+authors = ["Ka-Hing Cheung <github@hxbc.us>"]
+description = "gather filesystem access statistics using fanotify."
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# fanotify is not in any released versions yet
+libc = { git = "https://github.com/rust-lang/libc/" }
+structopt = "0.3"
+log = "0.4"
+env_logger = "0.7"
