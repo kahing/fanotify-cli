@@ -1,5 +1,5 @@
 [package]
-name = "fanotify"
+name = "fanotify-cli"
 version = "0.1.0"
 authors = ["Ka-Hing Cheung <github@hxbc.us>"]
 description = "gather filesystem access statistics using fanotify."

@@ -70,7 +70,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fanotify"
+name = "fanotify-cli"
 version = "0.1.0"
 dependencies = [
  "env_logger",
