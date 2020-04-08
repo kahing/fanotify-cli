@@ -1,11 +1,9 @@
-use std::error;
-use std::ffi::{CString, OsStr, OsString};
-use std::fmt::{self, Debug, Display, Formatter};
+use std::ffi::OsStr;
+use std::fmt::Debug;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
-use std::marker::PhantomData;
 use std::mem;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd, io::FromRawFd};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -16,135 +14,15 @@ extern crate env_logger;
 
 use libc;
 use libc::{c_int, c_uint, c_void};
-use structopt::StructOpt;
 
-fn cstring_from_os_str(src: &OsStr) -> Result<CString, OsString> {
-    return CString::new(src.to_os_string().into_vec())
-        .map_err(|e| OsString::from(format!("unexpected \\0 at pos {}", e.nul_position())));
-}
+#[macro_use]
+mod c_enum;
+use crate::c_enum::EnumValues;
+mod flags;
+use flags::Opt;
 
-#[derive(Debug, StructOpt)]
-#[structopt(about)]
-struct Opt {
-    /// default: FAN_ACCESS,FAN_MODIFY,FAN_CLOSE_WRITE,FAN_CLOSE_NOWRITE,FAN_OPEN,FAN_ONDIR,FAN_EVENT_ON_CHILD
-    #[structopt(short, long)]
-    events: Option<String>,
-
-    /// paths are relative to the filesystem namespace of this process
-    #[structopt(short = "p", long = "process")]
-    namespace: Option<u32>,
-
-    /// recursively monitor everything under paths, implies -m unless -f is used
-    #[structopt(short, long)]
-    recursive: bool,
-
-    /// notify for the mount point, implies -r
-    #[structopt(short, long)]
-    mount: bool,
-
-    /// notify for the filesystem, implies -r
-    #[structopt(short, long)]
-    filesystem: bool,
-
-    #[structopt(parse(try_from_os_str = cstring_from_os_str))]
-    paths: Vec<CString>,
-}
-
-const DEFAULT_EVENTS: &str =
-    "FAN_ACCESS,FAN_MODIFY,FAN_CLOSE_WRITE,FAN_CLOSE_NOWRITE,FAN_OPEN,FAN_ONDIR,FAN_EVENT_ON_CHILD";
 // no good reason, but fanotify(7) uses 200 in the example code
 const MAX_FANOTIFY_BUFS: usize = 200;
-
-trait EnumValues {
-    type Enum: Debug;
-
-    fn values() -> Vec<Self::Enum>;
-}
-
-struct CEnumParseError<T: EnumValues>(String, PhantomData<T>);
-
-impl<T> CEnumParseError<T>
-where
-    T: EnumValues + Send + Sync,
-{
-    fn new<S: AsRef<str> + Sized>(name: S) -> CEnumParseError<T> {
-        CEnumParseError::<T>(name.as_ref().into(), PhantomData)
-    }
-}
-
-impl<T> error::Error for CEnumParseError<T> where T: EnumValues + Send + Sync {}
-
-impl<T> Debug for CEnumParseError<T>
-where
-    T: EnumValues,
-{
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "invalid value: {}, options: {}",
-            self.0,
-            T::values()
-                .iter()
-                .map(|e| format!("{:?}", e))
-                .collect::<Vec<String>>()
-                .join(", ")
-        )
-    }
-}
-
-impl<T> Display for CEnumParseError<T>
-where
-    T: EnumValues,
-{
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-macro_rules! c_enum {
-    (
-	$(enum $name:ident {
-	    $($flag:ident),* $(,)*
-	})*
-    ) => (
-     $(
-	 #[repr(u64)]
-	 #[derive(Copy, Clone, Debug)]
-	 #[allow(non_camel_case_types)]
-	 enum $name {
-	     $($flag = libc::$flag),*
-	 }
-
-	 impl FromStr for $name {
-	     type Err = CEnumParseError<$name>;
-
-	     fn from_str(s: &str) -> Result<Self, Self::Err> {
-		 match s {
-		     $( stringify!($flag) => Ok($name::$flag), )*
-		     _ => Err(CEnumParseError::new(s))
-		 }
-	     }
-	 }
-
-	 impl AsRef<str> for $name {
-	     fn as_ref(&self) -> &str {
-		 match self {
-		     $( $name::$flag => stringify!($flag), )*
-		 }
-	     }
-	 }
-
-	 impl EnumValues for $name {
-	     type Enum = $name;
-
-	     fn values() -> Vec<$name> {
-		 vec![$($name::$flag),*]
-	     }
-	 }
-
-     )*
-    );
-}
 
 c_enum! {
     enum FanEvents {
@@ -286,42 +164,6 @@ fn handle_fanotify(
     };
 
     return Ok(());
-}
-
-impl Opt {
-    fn from_args_with_default() -> io::Result<Opt> {
-        let mut opt = Opt::from_args();
-
-        opt.events.get_or_insert(DEFAULT_EVENTS.into());
-        if opt.filesystem {
-            opt.recursive = true;
-        } else if opt.mount {
-            opt.recursive = true;
-        } else if opt.recursive {
-            opt.mount = true;
-        }
-
-        if opt.namespace.is_none() {
-            opt.paths = opt
-                .paths
-                .into_iter()
-                .map(|p| {
-                    // convert relative paths to absolute paths
-                    fs::canonicalize(OsStr::from_bytes(&p.as_bytes()))
-                        .map_err(|e| {
-                            io::Error::new(ErrorKind::InvalidInput, format!("{:?}: {}", p, e))
-                        })
-                        // should be safe to unwrap here since the path should not contain
-                        // internal nul bytes
-                        .map(|p| CString::new(p.as_os_str().as_bytes().to_vec()).unwrap())
-                })
-                .collect::<Vec<io::Result<_>>>()
-                .into_iter()
-                .collect::<io::Result<Vec<_>>>()?;
-        }
-
-        Ok(opt)
-    }
 }
 
 fn main() -> io::Result<()> {
