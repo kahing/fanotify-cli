@@ -48,20 +48,33 @@ where
     }
 }
 
-macro_rules! c_enum {
+macro_rules! bit_as(
     (
-	$(enum $name:ident {
-	    $($flag:ident),* $(,)*
-	})*
+	$trait:ident, $lhs:ident $op:tt $rhs:ident = $out:ident
     ) => (
-     $(
-	 #[repr(u64)]
-	 #[derive(Copy, Clone, Debug)]
-	 #[allow(non_camel_case_types)]
-	 enum $name {
-	     $($flag = libc::$flag),*
-	 }
+	 impl $trait<$rhs> for $lhs {
+	     type Output = $out;
 
+	     fn bitand(self, rhs: $rhs) -> Self::Output {
+		 self as $out & rhs as $out
+	     }
+	 }
+    );
+);
+
+macro_rules! bit_as_assoc(
+    (
+	$trait:ident, $lhs:ident $op:tt $rhs:ident = $out:ident
+    ) => (
+	bit_as!($trait, $lhs $op $rhs = $out);
+	bit_as!($trait, $rhs $op $lhs = $out);
+    );
+);
+
+macro_rules! __c_enum_impl {
+    (
+	$name:ident, $ty:ident, $($flag:ident),* $(,)*
+    ) => (
 	 impl FromStr for $name {
 	     type Err = $crate::c_enum::CEnumParseError<$name>;
 
@@ -88,6 +101,62 @@ macro_rules! c_enum {
 		 vec![$($name::$flag),*]
 	     }
 	 }
+
+	impl std::fmt::Display for $name {
+	    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", stringify!($name))
+	    }
+	}
+
+	bit_as_assoc!(BitAnd, $name & $ty = $ty);
+    );
+}
+
+macro_rules! c_enum {
+    (
+	$(enum $name:ident {
+	    $($flag:ident),* $(,)*
+	})*
+    ) => (
+	c_enum! {
+	    $(enum(u64) $name {
+		$($flag),*
+	    })*
+	}
+    );
+
+    (
+	$(enum(u32) $name:ident {
+	    $($flag:ident),* $(,)*
+	})*
+    ) => (
+	$(
+	    #[repr(u32)]
+	    #[derive(Copy, Clone, Debug)]
+	    #[allow(non_camel_case_types)]
+	    enum $name {
+		$($flag = libc::$flag),*
+	    }
+
+	    __c_enum_impl!($name, u32, $($flag),*);
+
+     )*
+    );
+
+    (
+	$(enum(u64) $name:ident {
+	    $($flag:ident),* $(,)*
+	})*
+    ) => (
+	$(
+	    #[repr(u64)]
+	    #[derive(Copy, Clone, Debug)]
+	    #[allow(non_camel_case_types)]
+	    enum $name {
+		$($flag = libc::$flag),*
+	    }
+
+	    __c_enum_impl!($name, u64, $($flag),*);
 
      )*
     );

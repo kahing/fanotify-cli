@@ -1,11 +1,13 @@
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::mem;
+use std::ops::BitAnd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd, io::FromRawFd};
 use std::path::PathBuf;
+use std::slice;
 use std::str::FromStr;
 
 #[macro_use]
@@ -13,7 +15,7 @@ extern crate log;
 extern crate env_logger;
 
 use libc;
-use libc::{c_int, c_uint, c_void};
+use libc::{c_int, c_uint};
 
 #[macro_use]
 mod c_enum;
@@ -31,8 +33,18 @@ c_enum! {
     FAN_CLOSE_WRITE,
     FAN_CLOSE_NOWRITE,
     FAN_OPEN,
+    FAN_Q_OVERFLOW,
+    FAN_ACCESS_PERM,
+    FAN_OPEN_PERM,
     FAN_ONDIR,
     FAN_EVENT_ON_CHILD,
+    }
+}
+
+c_enum! {
+    enum(u32) FanResponse {
+    FAN_ALLOW,
+    FAN_DENY,
     }
 }
 
@@ -73,10 +85,6 @@ libc_wrap! {
     fn poll(fds: *mut libc::pollfd, nfds: libc::nfds_t, timeout: c_int) {}
 }
 
-libc_wrap! {
-    fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize {}
-}
-
 fn open_namespace_root(pid: u32) -> io::Result<c_int> {
     let path = format!("/proc/{}/root", pid);
     Ok(OpenOptions::new()
@@ -85,16 +93,67 @@ fn open_namespace_root(pid: u32) -> io::Result<c_int> {
         .as_raw_fd())
 }
 
+// adapted from https://stackoverflow.com/questions/31046763/does-rust-have-anything-like-scanf
+macro_rules! scan {
+    ( $string:expr, $( $x:ty ),+ ) => {{
+        let mut iter = $string.split(char::is_whitespace);
+        ($(iter.next().and_then(|word| word.parse::<$x>().ok()),)*)
+    }}
+}
+
+trait ReadLine {
+    fn read_line(&mut self, buf: &mut String) -> io::Result<usize>;
+}
+
+impl ReadLine for io::Stdin {
+    fn read_line(&mut self, buf: &mut String) -> io::Result<usize> {
+        io::Stdin::read_line(self, buf)
+    }
+}
+
+fn handle_command(
+    input: &mut dyn ReadLine,
+    buf: &mut String,
+    notify: &mut dyn Write,
+) -> io::Result<()> {
+    if input.read_line(buf)? == 0 {
+        // EOF
+    } else {
+        match scan!(buf, FanResponse, i32) {
+            (Some(resp), Some(fd)) => {
+                let command = libc::fanotify_response {
+                    response: resp as u32,
+                    fd: fd,
+                };
+                let res = notify.write_all(unsafe {
+                    slice::from_raw_parts(
+                        &command as *const libc::fanotify_response as *const u8,
+                        mem::size_of::<libc::fanotify_response>(),
+                    )
+                });
+
+                // close the file
+                unsafe { File::from_raw_fd(fd) };
+                res?
+            }
+            _ => error!("invalid input: {}", buf),
+        }
+    }
+
+    Ok(())
+}
+
 fn handle_fanotify(
-    fd: c_int,
+    notify: &mut File,
     fabuf: &mut Vec<libc::fanotify_event_metadata>,
     opt: &Opt,
 ) -> io::Result<()> {
-    let nread = read(
-        fd,
-        fabuf.as_mut_ptr() as *mut c_void,
-        mem::size_of::<libc::fanotify_event_metadata>() * fabuf.len(),
-    );
+    let nread = notify.read(unsafe {
+        slice::from_raw_parts_mut(
+            fabuf.as_mut_ptr() as *mut u8,
+            mem::size_of::<libc::fanotify_event_metadata>() * fabuf.len(),
+        )
+    });
 
     match nread {
         Err(errno) => match errno.raw_os_error().unwrap() {
@@ -106,7 +165,7 @@ fn handle_fanotify(
         },
         Ok(mut nread) => {
             'next_metadata: for metadata in fabuf {
-                if nread < mem::size_of::<libc::fanotify_event_metadata>() as isize
+                if nread < mem::size_of::<libc::fanotify_event_metadata>() as usize
                     || metadata.event_len < mem::size_of::<libc::fanotify_event_metadata>() as u32
                     || metadata.event_len > nread as u32
                 {
@@ -116,7 +175,7 @@ fn handle_fanotify(
                         return Err(io::Error::from_raw_os_error(libc::EINVAL));
                     }
 
-                    nread -= metadata.event_len as isize;
+                    nread -= metadata.event_len as usize;
 
                     let mut mask_buf = String::new();
 
@@ -133,10 +192,16 @@ fn handle_fanotify(
                         let procfd_path = format!("/proc/self/fd/{}", metadata.fd);
                         let path = fs::read_link(procfd_path)?;
 
-                        unsafe {
-                            // let this drop and close
-                            File::from_raw_fd(metadata.fd);
-                        };
+                        if metadata.mask & FanEvents::FAN_OPEN_PERM != 0
+                            || metadata.mask & FanEvents::FAN_ACCESS_PERM != 0
+                        {
+                            // wait for command to close it
+                        } else {
+                            unsafe {
+                                // let this drop and close
+                                File::from_raw_fd(metadata.fd);
+                            };
+                        }
 
                         path
                     } else {
@@ -231,14 +296,19 @@ fn main() -> io::Result<()> {
     fabuf.reserve_exact(MAX_FANOTIFY_BUFS);
     unsafe { fabuf.set_len(MAX_FANOTIFY_BUFS) };
 
+    let mut notify = unsafe { File::from_raw_fd(notify_fd) };
+    let mut command_buf = String::new();
+
     loop {
         let ready = poll(events.as_mut_ptr(), events.len() as libc::nfds_t, -1)?;
         if ready > 0 {
             for e in &events {
                 if e.revents > 0 {
                     match e.fd {
-                        libc::STDIN_FILENO => (),
-                        _ => handle_fanotify(e.fd, &mut fabuf, &opt)?,
+                        libc::STDIN_FILENO => {
+                            handle_command(&mut io::stdin(), &mut command_buf, &mut notify)?
+                        }
+                        _ => handle_fanotify(&mut notify, &mut fabuf, &opt)?,
                     }
                 }
             }
