@@ -1,11 +1,11 @@
 use std::ffi::OsStr;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::mem;
 use std::ops::BitAnd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd, io::FromRawFd};
+use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd, io::FromRawFd, io::RawFd};
 use std::path::PathBuf;
 use std::slice;
 use std::str::FromStr;
@@ -143,6 +143,79 @@ fn handle_command(
     Ok(())
 }
 
+struct EventEntry {
+    mask: u64,
+    fd: Option<RawFd>,
+    pid: Option<u32>,
+    path: Option<PathBuf>,
+}
+
+impl EventEntry {
+    fn display_field<T: Display>(f: &Option<T>) -> String {
+        f.as_ref()
+            .map(|f| format!("{}", f))
+            .unwrap_or("-".to_string())
+    }
+
+    fn write_to(&self, w: &mut dyn Write) -> io::Result<()> {
+        let mut mask_buf = String::new();
+
+        for m in FanEvents::values() {
+            if (m as u64) & self.mask != 0 {
+                mask_buf += format!("{}|", m.as_ref()).as_ref();
+            }
+        }
+        if mask_buf.len() != 0 {
+            mask_buf.remove(mask_buf.len() - 1);
+        }
+
+        w.write_fmt(format_args!(
+            "{}\t{}\t{}\t",
+            mask_buf,
+            EventEntry::display_field(&self.fd),
+            EventEntry::display_field(&self.pid),
+        ))?;
+
+        if let Some(file) = &self.path {
+            w.write(&file.as_os_str().as_bytes())?;
+        } else {
+            w.write_all(b"-")?;
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod event_entry_tests {
+    use super::*;
+
+    #[test]
+    fn field_display() {
+        assert_eq!(EventEntry::display_field(&Some("1")), "1");
+        assert_eq!(EventEntry::display_field::<i32>(&None), "-");
+    }
+
+    #[test]
+    fn entry_display() -> io::Result<()> {
+        let mut buf = vec![];
+        EventEntry {
+            mask: FanEvents::FAN_ACCESS as u64 | FanEvents::FAN_MODIFY as u64,
+            fd: Some(2),
+            pid: Some(1),
+            path: Some("/foo/bar".into()),
+        }
+        .write_to(&mut buf)?;
+
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "FAN_ACCESS|FAN_MODIFY\t2\t1\t/foo/bar"
+        );
+
+        Ok(())
+    }
+}
+
 fn handle_fanotify(
     notify: &mut File,
     fabuf: &mut Vec<libc::fanotify_event_metadata>,
@@ -177,17 +250,6 @@ fn handle_fanotify(
 
                     nread -= metadata.event_len as usize;
 
-                    let mut mask_buf = String::new();
-
-                    for m in FanEvents::values() {
-                        if (m as u64) & metadata.mask != 0 {
-                            mask_buf += format!("{}|", m.as_ref()).as_ref();
-                        }
-                    }
-                    if mask_buf.len() != 0 {
-                        mask_buf.remove(mask_buf.len() - 1);
-                    }
-
                     let file = if metadata.fd >= 0 {
                         let procfd_path = format!("/proc/self/fd/{}", metadata.fd);
                         let path = fs::read_link(procfd_path)?;
@@ -203,24 +265,38 @@ fn handle_fanotify(
                             };
                         }
 
-                        path
-                    } else {
-                        PathBuf::from("-")
-                    };
-
-                    if file.as_os_str() != "-" && opt.recursive {
-                        if opt.namespace.is_none() {
-                            for p in &opt.paths {
-                                if !file.starts_with(OsStr::from_bytes(&p.as_bytes())) {
-                                    debug!("dropping unwanted notification: {:?}", file);
-                                    continue 'next_metadata;
+                        if opt.recursive {
+                            if opt.namespace.is_none() {
+                                for p in &opt.paths {
+                                    if !path.starts_with(OsStr::from_bytes(&p.as_bytes())) {
+                                        debug!("dropping unwanted notification: {:?}", path);
+                                        continue 'next_metadata;
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    print!("{}\t{}\t", mask_buf, metadata.fd);
-                    io::stdout().write(&file.as_os_str().as_bytes())?;
+                        Some(path)
+                    } else {
+                        None
+                    };
+
+                    EventEntry {
+                        mask: metadata.mask,
+                        fd: if metadata.fd >= 0 {
+                            Some(metadata.fd)
+                        } else {
+                            None
+                        },
+                        pid: if metadata.pid >= 0 {
+                            Some(metadata.pid as u32)
+                        } else {
+                            None
+                        },
+                        path: file,
+                    }
+                    .write_to(&mut io::stdout())?;
+
                     println!();
                     io::stdout().flush()?;
                 }
