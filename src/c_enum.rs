@@ -50,13 +50,13 @@ where
 
 macro_rules! bit_as(
     (
-	$trait:ident, $lhs:ident $op:tt $rhs:ident = $out:ident
+	$trait:ident.$method:ident, $lhs:ident $op:tt $rhs:ident = $out:ident
     ) => (
-	 impl $trait<$rhs> for $lhs {
+	 impl std::ops::$trait<$rhs> for $lhs {
 	     type Output = $out;
 
-	     fn bitand(self, rhs: $rhs) -> Self::Output {
-		 self as $out & rhs as $out
+	     fn $method(self, rhs: $rhs) -> Self::Output {
+		 self as $out $op rhs as $out
 	     }
 	 }
     );
@@ -64,10 +64,10 @@ macro_rules! bit_as(
 
 macro_rules! bit_as_assoc(
     (
-	$trait:ident, $lhs:ident $op:tt $rhs:ident = $out:ident
+	$trait:ident.$method:ident, $lhs:ident $op:tt $rhs:ident = $out:ident
     ) => (
-	bit_as!($trait, $lhs $op $rhs = $out);
-	bit_as!($trait, $rhs $op $lhs = $out);
+	bit_as!($trait.$method, $lhs $op $rhs = $out);
+	bit_as!($trait.$method, $rhs $op $lhs = $out);
     );
 );
 
@@ -75,7 +75,7 @@ macro_rules! __c_enum_impl {
     (
 	$name:ident, $ty:ident, $($flag:ident),* $(,)*
     ) => (
-	 impl FromStr for $name {
+	 impl std::str::FromStr for $name {
 	     type Err = $crate::c_enum::CEnumParseError<$name>;
 
 	     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -94,13 +94,13 @@ macro_rules! __c_enum_impl {
 	     }
 	 }
 
-	 impl $crate::c_enum::EnumValues for $name {
-	     type Enum = $name;
+	impl $crate::c_enum::EnumValues for $name {
+	    type Enum = $name;
 
-	     fn values() -> Vec<$name> {
-		 vec![$($name::$flag),*]
-	     }
-	 }
+	    fn values() -> Vec<$name> {
+		vec![$($name::$flag),*]
+	    }
+	}
 
 	impl std::fmt::Display for $name {
 	    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -108,7 +108,8 @@ macro_rules! __c_enum_impl {
 	    }
 	}
 
-	bit_as_assoc!(BitAnd, $name & $ty = $ty);
+	bit_as_assoc!(BitAnd.bitand, $name & $ty = $ty);
+	bit_as_assoc!(BitOr.bitor, $name | $ty = $ty);
     );
 }
 
@@ -125,6 +126,7 @@ macro_rules! c_enum {
 	}
     );
 
+    // replicated for each of the int types because #[repl()] cannot take macro param
     (
 	$(enum(u32) $name:ident {
 	    $($flag:ident),* $(,)*
@@ -132,7 +134,7 @@ macro_rules! c_enum {
     ) => (
 	$(
 	    #[repr(u32)]
-	    #[derive(Copy, Clone, Debug)]
+	    #[derive(Copy, Clone, Debug, PartialEq)]
 	    #[allow(non_camel_case_types)]
 	    enum $name {
 		$($flag = libc::$flag),*
@@ -150,7 +152,7 @@ macro_rules! c_enum {
     ) => (
 	$(
 	    #[repr(u64)]
-	    #[derive(Copy, Clone, Debug)]
+	    #[derive(Copy, Clone, Debug, PartialEq)]
 	    #[allow(non_camel_case_types)]
 	    enum $name {
 		$($flag = libc::$flag),*
@@ -160,4 +162,78 @@ macro_rules! c_enum {
 
      )*
     );
+
+    (
+	$(enum(i32) $name:ident {
+	    $($flag:ident),* $(,)*
+	})*
+    ) => (
+	$(
+	    #[repr(i32)]
+	    #[derive(Copy, Clone, Debug, PartialEq)]
+	    #[allow(non_camel_case_types)]
+	    enum $name {
+		$($flag = libc::$flag),*
+	    }
+
+	    __c_enum_impl!($name, i32, $($flag),*);
+
+     )*
+    );
+
+    (
+	$(enum(i64) $name:ident {
+	    $($flag:ident),* $(,)*
+	})*
+    ) => (
+	$(
+	    #[repr(i64)]
+	    #[derive(Copy, Clone, Debug, PartialEq)]
+	    #[allow(non_camel_case_types)]
+	    enum $name {
+		$($flag = libc::$flag),*
+	    }
+
+	    __c_enum_impl!($name, i64, $($flag),*);
+
+     )*
+    );
+}
+
+#[cfg(test)]
+mod tests {
+
+    c_enum! {
+    enum(i32) IOFlags{
+        O_APPEND,
+        O_ASYNC,
+    }
+    }
+
+    #[test]
+    fn enum_value() {
+        assert_eq!(IOFlags::O_APPEND as i32, libc::O_APPEND);
+    }
+
+    #[test]
+    fn enum_parse() {
+        assert_eq!("O_APPEND".parse::<IOFlags>().unwrap(), IOFlags::O_APPEND);
+    }
+
+    #[test]
+    fn enum_str() {
+        assert_eq!(IOFlags::O_APPEND.as_ref(), "O_APPEND");
+    }
+
+    #[test]
+    fn enum_bit() {
+        assert_eq!(
+            IOFlags::O_APPEND | libc::O_ASYNC,
+            libc::O_APPEND | libc::O_ASYNC
+        );
+        assert_eq!(
+            IOFlags::O_APPEND & libc::O_ASYNC,
+            libc::O_APPEND & libc::O_ASYNC
+        );
+    }
 }

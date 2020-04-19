@@ -3,12 +3,10 @@ use std::fmt::{Debug, Display};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::mem;
-use std::ops::BitAnd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd, io::FromRawFd, io::RawFd};
 use std::path::PathBuf;
 use std::slice;
-use std::str::FromStr;
 
 #[macro_use]
 extern crate log;
@@ -320,9 +318,9 @@ fn main() -> io::Result<()> {
     let mut mask = 0;
 
     for m in opt.events.as_ref().unwrap().split(',') {
-        mask |= m
-            .parse::<FanEvents>()
-            .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))? as u64;
+        mask = mask
+            | m.parse::<FanEvents>()
+                .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))? as u64;
 
         debug!(
             "adding event {} = {:x}",
