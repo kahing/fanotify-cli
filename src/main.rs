@@ -115,7 +115,10 @@ fn handle_command(
     notify: &mut dyn Write,
 ) -> io::Result<()> {
     if input.read_line(buf)? == 0 {
-        // EOF
+        Err(io::Error::new(
+            ErrorKind::UnexpectedEof,
+            io::Error::last_os_error(),
+        ))
     } else {
         match scan!(buf, FanResponse, i32) {
             (Some(resp), Some(fd)) => {
@@ -132,13 +135,17 @@ fn handle_command(
 
                 // close the file
                 unsafe { File::from_raw_fd(fd) };
-                res?
+                res
             }
-            _ => error!("invalid input: {}", buf),
+            _ => {
+                error!("invalid input: {}", buf);
+                Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    io::Error::last_os_error(),
+                ))
+            }
         }
     }
-
-    Ok(())
 }
 
 struct EventEntry {
