@@ -99,6 +99,19 @@ macro_rules! scan {
     }}
 }
 
+#[cfg(test)]
+mod scan_test {
+    #[test]
+    fn scan_2() {
+        assert_eq!(scan!("1 2", String, i32), (Some("1".into()), Some(2)));
+    }
+
+    #[test]
+    fn scan_none() {
+        assert_eq!(scan!("a b", i32, i32), (None, None));
+    }
+}
+
 trait ReadLine {
     fn read_line(&mut self, buf: &mut String) -> io::Result<usize>;
 }
