@@ -320,7 +320,7 @@ fn main() -> io::Result<()> {
     for m in opt.events.as_ref().unwrap().split(',') {
         mask = mask
             | m.parse::<FanEvents>()
-                .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))? as u64;
+                .map_err(|e| io::Error::new(ErrorKind::InvalidInput, e))?;
 
         debug!(
             "adding event {} = {:x}",
